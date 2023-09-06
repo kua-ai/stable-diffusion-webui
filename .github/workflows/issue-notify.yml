@@ -1,0 +1,7 @@
+on:
+  issues:
+    types: [ assigned ]
+
+jobs:
+  notify:
+    uses: kua-ai/github-workflows/.github/workflows/issue.yml@main

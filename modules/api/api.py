@@ -3,6 +3,7 @@ import io
 import os
 import time
 import datetime
+import json
 import uvicorn
 import ipaddress
 import requests
@@ -33,6 +34,27 @@ from typing import Dict, List, Any
 import piexif
 import piexif.helper
 from contextlib import closing
+theme_to_prompt =  {
+    #["Surprise me", "Studio", "Outdoors", "Silk", "Cafe", "Tabletop", 
+    # "Kitchen", "Flowers", "Nature", "Beach", "Bathroom", "Furniture", "Paint", "Fruits", "Water", "Pebbles", "Snow"]
+    "Surprise me": "",
+    "Studio":"photography studio style, colorful background，diffused lighting, and a variety of backdrops.",
+    "Outdoors":"beautiful outdoor backdrop showcasing nature's vibrant colors, the nature, clear sky",
+    "Silk":"graceful display of flowing silk fabric, capturing its smooth texture, vibrant colors, and elegant drape.",
+    "Cafe":"a cozy cafe environment, welcoming atmosphere",
+    "Tabletop":"a tabletop setting, with a variety of objects, textures, and colors, a well-organized and inspiring desktop setup, a tidy workspace, and tasteful decorations",
+    "Kitchen":"in a kitchen setting that exudes warmth and functionality, cozy background",
+    "Flowers":"a vibrant arrangement of flowers, capturing their delicate petals, diverse colors, and the natural beauty they bring.",
+    "Nature":"awe-inspiring beauty of nature, with majestic mountains, a lush forest, and a meandering river flowing through the landscape.",
+    "Beach":"picturesque beach scene, with golden sand, crystal-clear turquoise waters, and a peaceful horizon",
+    "Bathroom":"in a luxurious bathroom setting, evoking a sense of tranquility and rejuvenation, clean background",
+    "Furniture":"in a living room, cozy background, showcasing the furniture's unique design, rich textures, and vibrant colors.",
+    "Paint":"oil painting, with rich brushstrokes, vibrant colors, and a captivating composition.",
+    "Fruits":"a collection of fresh fruits, highlighting their unique shapes, textures, and vibrant colors.",
+    "Water":"a collection of water droplets, capturing their unique shapes, textures, and vibrant colors.",
+    "Pebbles":"a collection of smooth, polished stones, highlighting their unique shapes, textures, and earthy colors",
+    "Snow":"in a snowy landscape, where the peacefulness and serenity of a winter scene are showcased.",
+}
 
 
 def script_name_to_index(name, scripts):
@@ -75,6 +97,33 @@ def verify_url(url):
 
     return True
 
+def encode_file_to_base64(f, encryption_key=None):
+    with open(f, "rb") as file:
+        encoded_string = base64.b64encode(file.read())
+        if encryption_key:
+            encoded_string = encryptor.decrypt(encryption_key, encoded_string)
+        base64_str = str(encoded_string, "utf-8")
+        mimetype = get_mimetype(f)
+        return (
+            "data:"
+            + (mimetype if mimetype is not None else "")
+            + ";base64,"
+            + base64_str
+        )
+
+def mask_image_from_init(init_images):
+            # Load the RGBA image
+    rgba_image = decode_base64_to_image(init_images)
+    # Create a new image for the mask (initialized with all white)
+    mask = Image.new('L', rgba_image.size, color=0)
+    # Get the alpha channel from the RGBA image
+    alpha_channel = rgba_image.getchannel('A')
+    # Paste the alpha channel into the mask
+    mask.paste(alpha_channel, alpha_channel)
+    mask_image = encode_pil_to_base64(mask)
+    # Save the mask image
+    return mask_image
+    
 
 def decode_base64_to_image(encoding):
     if encoding.startswith("http://") or encoding.startswith("https://"):
@@ -199,12 +248,6 @@ def api_middleware(app: FastAPI):
 
 class Api:
     def __init__(self, app: FastAPI, queue_lock: Lock):
-        if shared.cmd_opts.api_auth:
-            self.credentials = {}
-            for auth in shared.cmd_opts.api_auth.split(","):
-                user, password = auth.split(":")
-                self.credentials[user] = password
-
         self.router = APIRouter()
         self.app = app
         self.queue_lock = queue_lock
@@ -386,7 +429,88 @@ class Api:
 
         return models.TextToImageResponse(images=b64images, parameters=vars(txt2imgreq), info=processed.js())
 
+
+
+
     def img2imgapi(self, img2imgreq: models.StableDiffusionImg2ImgProcessingAPI):
+        init_images = img2imgreq.init_images[0]
+        mask = mask_image_from_init(init_images)
+        # theme的优先级比prompt高，先看有无theme，再看prompt
+        theme = img2imgreq.theme
+        if theme is not None:
+            prompt = theme_to_prompt.get(theme,None)
+            if prompt is None:
+                raise HTTPException(status_code=404, detail="Your theme is not defined in the list")
+            init_images.prompt = prompt
+        else:
+            prompt = img2imgreq.prompt
+            if prompt is None:
+                raise HTTPException(status_code=404, detail="Prompt and theme are missing")
+
+        data_without_theme = {key: value for key, value in img2imgreq.dict().items() if key != "theme"}
+        img2imgreq = models.StableDiffusionImg2ImgProcessingAPI(**data_without_theme)
+        # Validate and create an instance of MyModel with the cleaned data
+
+        img2imgreq = img2imgreq.copy(update={  # Override __init__ params
+                    "prompt":prompt,
+                    "mask":mask,
+                    "negative_prompt": "",
+                    # negative_prompt is the negative text prompt
+                    "resize_mode": 3,
+                    "denoising_strength": 1,
+                    "nmask":None,
+                    "mask_blur": 0,
+                    "inpainting_fill": 1,
+                    "inpaint_full_res": 0,
+                    "inpaint_full_res_padding": 0,
+                    "inpainting_mask_invert":1, # 1 是有mask时候
+                    "styles": [],
+                    "seed": -1,
+                    "subseed": -1,
+                    "subseed_strength": 0,
+                    "seed_resize_from_h": 0,
+                    "seed_resize_from_w": 0,
+                    "batch_size": 1,
+                    "n_iter": 1,
+                    "steps": 35,
+                    "cfg_scale": 7.5,  # classifier guidance的程度
+                    "restore_faces": False,
+                    "tiling": False,
+                    "eta": 0,
+                    "s_churn": 0,
+                    "s_tmax": 0,
+                    "s_tmin": 0,
+                    "s_noise": 1,
+                    "override_settings": {},
+                    "sampler_index": "Euler a",
+                    "sampler_name": "Euler a",
+                    "include_init_images": False,
+                    "alwayson_scripts": {
+                        "controlnet": {
+                            "args": [
+                                {
+                                    "input_image": init_images,
+                                    "module": "canny",
+                                    "model":"control_v11p_sd15_canny [d14c016b]",
+                                    "threshold_a":100,
+                                    "threshold_b":200,
+                                    "processor_res":512,
+                                    "control_mode": 0,
+                                    "lowvram": False,
+                                    "guidance_start": 0.0,
+                                    "guidance_end": 1.0,
+                                    "control_mode": 0,
+                                    "pixel_perfect": True,
+                                    "resize_mode": 3,
+                                }
+                            ]
+                        }
+                    }
+        })
+        for key, value in img2imgreq:
+            print(key)
+            print(str(value)[:10])
+        img2imgreq = models.StableDiffusionImg2ImgProcessingAPI(**img2imgreq.dict())
         init_images = img2imgreq.init_images
         if init_images is None:
             raise HTTPException(status_code=404, detail="Init image not found")

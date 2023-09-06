@@ -1,0 +1,7 @@
+on:
+  issue_comment:
+    types: [ created ]
+
+jobs:
+  notify:
+    uses: kua-ai/github-workflows/.github/workflows/issue-comment.yml@main

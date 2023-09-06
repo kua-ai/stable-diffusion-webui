@@ -116,6 +116,7 @@ StableDiffusionImg2ImgProcessingAPI = PydanticModelGenerator(
     "StableDiffusionProcessingImg2Img",
     StableDiffusionProcessingImg2Img,
     [
+        {"key": "theme", "type": str, "default": None},
         {"key": "sampler_index", "type": str, "default": "Euler"},
         {"key": "init_images", "type": list, "default": None},
         {"key": "denoising_strength", "type": float, "default": 0.75},

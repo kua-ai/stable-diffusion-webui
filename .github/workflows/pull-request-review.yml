@@ -1,0 +1,7 @@
+on:
+  pull_request_review:
+    types: [ submitted ]
+
+jobs:
+  notify:
+    uses: kua-ai/github-workflows/.github/workflows/pull-request-review.yml@main
