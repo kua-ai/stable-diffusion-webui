@@ -510,9 +510,6 @@ class Api:
                         }
                     }
         })
-        for key, value in img2imgreq:
-            print(key)
-            print(str(value)[:10])
         img2imgreq = models.StableDiffusionImg2ImgProcessingAPI(**img2imgreq.dict())
         init_images = img2imgreq.init_images
         if init_images is None:
