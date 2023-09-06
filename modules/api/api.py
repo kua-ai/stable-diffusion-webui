@@ -3,7 +3,11 @@ import io
 import os
 import time
 import datetime
+import json
 import uvicorn
+import ipaddress
+import requests
+import random
 import gradio as gr
 from threading import Lock
 from io import BytesIO
@@ -15,7 +19,7 @@ from fastapi.encoders import jsonable_encoder
 from secrets import compare_digest
 
 import modules.shared as shared
-from modules import sd_samplers, deepbooru, sd_hijack, images, scripts, ui, postprocessing, errors, restart
+from modules import sd_samplers, deepbooru, sd_hijack, images, scripts, ui, postprocessing, errors, restart, shared_items
 from modules.api import models
 from modules.shared import opts
 from modules.processing import StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img, process_images
@@ -23,8 +27,7 @@ from modules.textual_inversion.textual_inversion import create_embedding, train_
 from modules.textual_inversion.preprocess import preprocess
 from modules.hypernetworks.hypernetwork import create_hypernetwork, train_hypernetwork
 from PIL import PngImagePlugin,Image
-from modules.sd_models import checkpoints_list, unload_model_weights, reload_model_weights, checkpoint_aliases
-from modules.sd_vae import vae_dict
+from modules.sd_models import unload_model_weights, reload_model_weights, checkpoint_aliases
 from modules.sd_models_config import find_checkpoint_config_near_filename
 from modules.realesrgan_model import get_realesrgan_models
 from modules import devices
@@ -32,6 +35,27 @@ from typing import Dict, List, Any
 import piexif
 import piexif.helper
 from contextlib import closing
+theme_to_prompt =  {
+    #["Surprise me", "Studio", "Outdoors", "Silk", "Cafe", "Tabletop", 
+    # "Kitchen", "Flowers", "Nature", "Beach", "Bathroom", "Furniture", "Paint", "Fruits", "Water", "Pebbles", "Snow"]
+    "Surprise me": "",
+    "Studio":"photography studio style, colorful background，diffused lighting, and a variety of backdrops.",
+    "Outdoors":"beautiful outdoor backdrop showcasing nature's vibrant colors, the nature, clear sky",
+    "Silk":"graceful display of flowing silk fabric, capturing its smooth texture, vibrant colors, and elegant drape.",
+    "Cafe":"a cozy cafe environment, welcoming atmosphere",
+    "Tabletop":"a tabletop setting, with a variety of objects, textures, and colors, a well-organized and inspiring desktop setup, a tidy workspace, and tasteful decorations",
+    "Kitchen":"in a kitchen setting that exudes warmth and functionality, cozy background",
+    "Flowers":"a vibrant arrangement of flowers, capturing their delicate petals, diverse colors, and the natural beauty they bring.",
+    "Nature":"awe-inspiring beauty of nature, with majestic mountains, a lush forest, and a meandering river flowing through the landscape.",
+    "Beach":"picturesque beach scene, with golden sand, crystal-clear turquoise waters, and a peaceful horizon",
+    "Bathroom":"in a luxurious bathroom setting, evoking a sense of tranquility and rejuvenation, clean background",
+    "Furniture":"in a living room, cozy background, showcasing the furniture's unique design, rich textures, and vibrant colors.",
+    "Paint":"oil painting, with rich brushstrokes, vibrant colors, and a captivating composition.",
+    "Fruits":"a collection of fresh fruits, highlighting their unique shapes, textures, and vibrant colors.",
+    "Water":"a collection of water droplets, capturing their unique shapes, textures, and vibrant colors.",
+    "Pebbles":"a collection of smooth, polished stones, highlighting their unique shapes, textures, and earthy colors",
+    "Snow":"in a snowy landscape, where the peacefulness and serenity of a winter scene are showcased.",
+}
 
 
 def script_name_to_index(name, scripts):
@@ -56,7 +80,68 @@ def setUpscalers(req: dict):
     return reqDict
 
 
+def verify_url(url):
+    """Returns True if the url refers to a global resource."""
+
+    import socket
+    from urllib.parse import urlparse
+    try:
+        parsed_url = urlparse(url)
+        domain_name = parsed_url.netloc
+        host = socket.gethostbyname_ex(domain_name)
+        for ip in host[2]:
+            ip_addr = ipaddress.ip_address(ip)
+            if not ip_addr.is_global:
+                return False
+    except Exception:
+        return False
+
+    return True
+
+def encode_file_to_base64(f, encryption_key=None):
+    with open(f, "rb") as file:
+        encoded_string = base64.b64encode(file.read())
+        if encryption_key:
+            encoded_string = encryptor.decrypt(encryption_key, encoded_string)
+        base64_str = str(encoded_string, "utf-8")
+        mimetype = get_mimetype(f)
+        return (
+            "data:"
+            + (mimetype if mimetype is not None else "")
+            + ";base64,"
+            + base64_str
+        )
+
+def mask_image_from_init(init_images):
+            # Load the RGBA image
+    rgba_image = decode_base64_to_image(init_images)
+    # Create a new image for the mask (initialized with all white)
+    mask = Image.new('L', rgba_image.size, color=0)
+    # Get the alpha channel from the RGBA image
+    alpha_channel = rgba_image.getchannel('A')
+    # Paste the alpha channel into the mask
+    mask.paste(alpha_channel, alpha_channel)
+    mask_image = encode_pil_to_base64(mask)
+    # Save the mask image
+    return mask_image
+    
+
 def decode_base64_to_image(encoding):
+    if encoding.startswith("http://") or encoding.startswith("https://"):
+        if not opts.api_enable_requests:
+            raise HTTPException(status_code=500, detail="Requests not allowed")
+
+        if opts.api_forbid_local_requests and not verify_url(encoding):
+            raise HTTPException(status_code=500, detail="Request to local resource not allowed")
+
+        headers = {'user-agent': opts.api_useragent} if opts.api_useragent else {}
+        response = requests.get(encoding, timeout=30, headers=headers)
+        try:
+            image = Image.open(BytesIO(response.content))
+            return image
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="Invalid image url") from e
+
     if encoding.startswith("data:image/"):
         encoding = encoding.split(";")[1].split(",")[1]
     try:
@@ -164,12 +249,6 @@ def api_middleware(app: FastAPI):
 
 class Api:
     def __init__(self, app: FastAPI, queue_lock: Lock):
-        if shared.cmd_opts.api_auth:
-            self.credentials = {}
-            for auth in shared.cmd_opts.api_auth.split(","):
-                user, password = auth.split(":")
-                self.credentials[user] = password
-
         self.router = APIRouter()
         self.app = app
         self.queue_lock = queue_lock
@@ -197,6 +276,7 @@ class Api:
         self.add_api_route("/sdapi/v1/prompt-styles", self.get_prompt_styles, methods=["GET"], response_model=List[models.PromptStyleItem])
         self.add_api_route("/sdapi/v1/embeddings", self.get_embeddings, methods=["GET"], response_model=models.EmbeddingsResponse)
         self.add_api_route("/sdapi/v1/refresh-checkpoints", self.refresh_checkpoints, methods=["POST"])
+        self.add_api_route("/sdapi/v1/refresh-vae", self.refresh_vae, methods=["POST"])
         self.add_api_route("/sdapi/v1/create/embedding", self.create_embedding, methods=["POST"], response_model=models.CreateResponse)
         self.add_api_route("/sdapi/v1/create/hypernetwork", self.create_hypernetwork, methods=["POST"], response_model=models.CreateResponse)
         self.add_api_route("/sdapi/v1/preprocess", self.preprocess, methods=["POST"], response_model=models.PreprocessResponse)
@@ -329,6 +409,7 @@ class Api:
 
         with self.queue_lock:
             with closing(StableDiffusionProcessingTxt2Img(sd_model=shared.sd_model, **args)) as p:
+                p.is_api = True
                 p.scripts = script_runner
                 p.outpath_grids = opts.outdir_txt2img_grids
                 p.outpath_samples = opts.outdir_txt2img_samples
@@ -343,12 +424,96 @@ class Api:
                         processed = process_images(p)
                 finally:
                     shared.state.end()
+                    shared.total_tqdm.clear()
 
         b64images = list(map(encode_pil_to_base64, processed.images)) if send_images else []
 
         return models.TextToImageResponse(images=b64images, parameters=vars(txt2imgreq), info=processed.js())
 
-    def img2imgapi(self, img2imgreq: models.StableDiffusionImg2ImgProcessingAPI):
+
+
+
+    def img2imgapi(self, img2imgreq: models.KuaStableDiffusionImg2ImgProcessingAPI):
+        init_images = img2imgreq.init_images[0]
+        mask = mask_image_from_init(init_images)
+        # theme的优先级比prompt高，先看有无theme，再看prompt
+        theme = img2imgreq.theme
+        if theme is not None:
+            if theme == "Surprise me":
+                theme = random.choice(list(theme_to_prompt.keys()))
+            prompt = theme_to_prompt.get(theme,None)
+            if prompt is None:
+                raise HTTPException(status_code=404, detail="Your theme is not defined in the list")
+            img2imgreq.prompt = prompt
+        else:
+            prompt = img2imgreq.prompt
+            if prompt is None:
+                raise HTTPException(status_code=404, detail="Prompt and theme are missing")
+
+        data_without_theme = {key: value for key, value in img2imgreq.dict().items() if key != "theme"}
+        img2imgreq = models.StableDiffusionImg2ImgProcessingAPI(**data_without_theme)
+        # Validate and create an instance of MyModel with the cleaned data
+
+        img2imgreq = img2imgreq.copy(update={  # Override __init__ params
+                    "prompt":prompt,
+                    "mask":mask,
+                    "negative_prompt": "",
+                    # negative_prompt is the negative text prompt
+                    "resize_mode": 1,
+                    "denoising_strength": 1,
+                    "nmask":None,
+                    "mask_blur": 0,
+                    "inpainting_fill": 1,
+                    "inpaint_full_res": 0,
+                    "inpaint_full_res_padding": 0,
+                    "inpainting_mask_invert":1, # 1 是有mask时候
+                    "styles": [],
+                    "seed": -1,
+                    "subseed": -1,
+                    "subseed_strength": 0,
+                    "seed_resize_from_h": 0,
+                    "seed_resize_from_w": 0,
+                    "batch_size": 1,
+                    "n_iter": 1,
+                    "steps": 35,
+                    "cfg_scale": 7.5,  # classifier guidance的程度
+                    "restore_faces": False,
+                    "tiling": False,
+                    "eta": 0,
+                    "s_churn": 0,
+                    "s_tmax": 0,
+                    "s_tmin": 0,
+                    "s_noise": 1,
+                    "override_settings": {},
+                    "sampler_index": "Euler a",
+                    "sampler_name": "Euler a",
+                    "include_init_images": False,
+                    "alwayson_scripts": {
+                        "controlnet": {
+                            "args": [
+                                {
+                                    "input_image": init_images,
+                                    "module": "canny",
+                                    "model":"control_v11p_sd15_canny [d14c016b]",
+                                    "threshold_a":100,
+                                    "threshold_b":200,
+                                    "processor_res":512,
+                                    "control_mode": 0,
+                                    "lowvram": False,
+                                    "guidance_start": 0.0,
+                                    "guidance_end": 1.0,
+                                    "control_mode": 0,
+                                    "pixel_perfect": True,
+                                    "resize_mode": 3,
+                                }
+                            ]
+                        }
+                    }
+        })
+        for key, value in img2imgreq:
+            print(key)
+            print(str(value)[:10])
+        img2imgreq = models.StableDiffusionImg2ImgProcessingAPI(**img2imgreq.dict())
         init_images = img2imgreq.init_images
         if init_images is None:
             raise HTTPException(status_code=404, detail="Init image not found")
@@ -388,6 +553,7 @@ class Api:
         with self.queue_lock:
             with closing(StableDiffusionProcessingImg2Img(sd_model=shared.sd_model, **args)) as p:
                 p.init_images = [decode_base64_to_image(x) for x in init_images]
+                p.is_api = True
                 p.scripts = script_runner
                 p.outpath_grids = opts.outdir_img2img_grids
                 p.outpath_samples = opts.outdir_img2img_samples
@@ -402,6 +568,7 @@ class Api:
                         processed = process_images(p)
                 finally:
                     shared.state.end()
+                    shared.total_tqdm.clear()
 
         b64images = list(map(encode_pil_to_base64, processed.images)) if send_images else []
 
@@ -530,7 +697,7 @@ class Api:
             raise RuntimeError(f"model {checkpoint_name!r} not found")
 
         for k, v in req.items():
-            shared.opts.set(k, v)
+            shared.opts.set(k, v, is_api=True)
 
         shared.opts.save(shared.config_filename)
         return
@@ -562,10 +729,12 @@ class Api:
         ]
 
     def get_sd_models(self):
-        return [{"title": x.title, "model_name": x.model_name, "hash": x.shorthash, "sha256": x.sha256, "filename": x.filename, "config": find_checkpoint_config_near_filename(x)} for x in checkpoints_list.values()]
+        import modules.sd_models as sd_models
+        return [{"title": x.title, "model_name": x.model_name, "hash": x.shorthash, "sha256": x.sha256, "filename": x.filename, "config": find_checkpoint_config_near_filename(x)} for x in sd_models.checkpoints_list.values()]
 
     def get_sd_vaes(self):
-        return [{"model_name": x, "filename": vae_dict[x]} for x in vae_dict.keys()]
+        import modules.sd_vae as sd_vae
+        return [{"model_name": x, "filename": sd_vae.vae_dict[x]} for x in sd_vae.vae_dict.keys()]
 
     def get_hypernetworks(self):
         return [{"name": name, "path": shared.hypernetworks[name]} for name in shared.hypernetworks]
@@ -607,6 +776,10 @@ class Api:
     def refresh_checkpoints(self):
         with self.queue_lock:
             shared.refresh_checkpoints()
+
+    def refresh_vae(self):
+        with self.queue_lock:
+            shared_items.refresh_vae_list()
 
     def create_embedding(self, args: dict):
         try:
