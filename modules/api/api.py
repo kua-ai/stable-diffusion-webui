@@ -72,6 +72,12 @@ def validate_sampler_name(name):
 
     return name
 
+def pil_img_to_base64(image, fmt="png") -> str:
+    outbuffer = BytesIO()
+    image.save(outbuffer, format=fmt)
+    byte_data = outbuffer.getvalue()
+    base64str = base64.b64encode(byte_data).decode("utf-8")
+    return f"data:image/{fmt};base64," + base64str
 
 def setUpscalers(req: dict):
     reqDict = vars(req)
@@ -112,9 +118,7 @@ def encode_file_to_base64(f, encryption_key=None):
             + base64_str
         )
 
-def mask_image_from_init(init_images):
-            # Load the RGBA image
-    rgba_image = decode_base64_to_image(init_images)
+def mask_image_from_init(rgba_image):
     # Create a new image for the mask (initialized with all white)
     mask = Image.new('L', rgba_image.size, color=0)
     # Get the alpha channel from the RGBA image
@@ -128,19 +132,19 @@ def mask_image_from_init(init_images):
 
 def decode_base64_to_image(encoding):
     if encoding.startswith("http://") or encoding.startswith("https://"):
-        if not opts.api_enable_requests:
-            raise HTTPException(status_code=500, detail="Requests not allowed")
+        # if not opts.api_enable_requests:
+    #         raise HTTPException(status_code=422, detail="Requests not allowed")
 
-        if opts.api_forbid_local_requests and not verify_url(encoding):
-            raise HTTPException(status_code=500, detail="Request to local resource not allowed")
+    #     if opts.api_forbid_local_requests and not verify_url(encoding):
+    #         raise HTTPException(status_code=422, detail="Request to local resource not allowed")
 
-        headers = {'user-agent': opts.api_useragent} if opts.api_useragent else {}
-        response = requests.get(encoding, timeout=30, headers=headers)
+        # headers = {'user-agent': opts.api_useragent} if opts.api_useragent else {}
+        response = requests.get(encoding, timeout=60, headers={})
         try:
             image = Image.open(BytesIO(response.content))
             return image
         except Exception as e:
-            raise HTTPException(status_code=500, detail="Invalid image url") from e
+            raise HTTPException(status_code=422, detail="Invalid image url") from e
 
     if encoding.startswith("data:image/"):
         encoding = encoding.split(";")[1].split(",")[1]
@@ -148,12 +152,11 @@ def decode_base64_to_image(encoding):
         image = Image.open(BytesIO(base64.b64decode(encoding)))
         return image
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Invalid encoded image") from e
+        raise HTTPException(status_code=422, detail="Invalid encoded image") from e
 
 
 def encode_pil_to_base64(image):
     with io.BytesIO() as output_bytes:
-
         if opts.samples_format.lower() == 'png':
             use_metadata = False
             metadata = PngImagePlugin.PngInfo()
@@ -434,8 +437,11 @@ class Api:
 
 
     def img2imgapi(self, img2imgreq: models.KuaStableDiffusionImg2ImgProcessingAPI):
-        init_images = img2imgreq.init_images[0]
-        mask = mask_image_from_init(init_images)
+        init_images_url = img2imgreq.init_images[0]
+        init_images = decode_base64_to_image(init_images_url) # type: Image.Image
+        mask = mask_image_from_init(init_images) # type: string
+        init_images = pil_img_to_base64(init_images)
+
         # theme的优先级比prompt高，先看有无theme，再看prompt
         theme = img2imgreq.theme
         if theme is not None:
