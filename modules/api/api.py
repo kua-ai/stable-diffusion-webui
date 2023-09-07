@@ -574,12 +574,13 @@ class Api:
                     shared.total_tqdm.clear()
 
         b64images = list(map(encode_pil_to_base64, processed.images)) if send_images else []
+        b64images = [b64images[0]] if len(b64images) == 2 else b64images
 
         if not img2imgreq.include_init_images:
             img2imgreq.init_images = None
             img2imgreq.mask = None
 
-        return models.ImageToImageResponse(images=b64images, parameters=vars(img2imgreq), info=processed.js())
+        return models.ImageToImageResponse(images=b64images)
 
     def extras_single_image_api(self, req: models.ExtrasSingleImageRequest):
         reqDict = setUpscalers(req)
