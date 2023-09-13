@@ -35,6 +35,7 @@ from typing import Dict, List, Any
 import piexif
 import piexif.helper
 from contextlib import closing
+from loguru import logger
 theme_to_prompt =  {
     #["Surprise me", "Studio", "Outdoors", "Silk", "Cafe", "Tabletop", 
     # "Kitchen", "Flowers", "Nature", "Beach", "Bathroom", "Furniture", "Paint", "Fruits", "Water", "Pebbles", "Snow"]
@@ -132,19 +133,22 @@ def mask_image_from_init(rgba_image):
 
 def decode_base64_to_image(encoding):
     if encoding.startswith("http://") or encoding.startswith("https://"):
-        # if not opts.api_enable_requests:
-    #         raise HTTPException(status_code=422, detail="Requests not allowed")
-
-    #     if opts.api_forbid_local_requests and not verify_url(encoding):
-    #         raise HTTPException(status_code=422, detail="Request to local resource not allowed")
-
-        # headers = {'user-agent': opts.api_useragent} if opts.api_useragent else {}
-        response = requests.get(encoding, timeout=60, headers={})
-        try:
-            image = Image.open(BytesIO(response.content))
-            return image
-        except Exception as e:
-            raise HTTPException(status_code=422, detail="Invalid image url") from e
+        max_retries = 3
+        timeout_seconds = 10
+        for retry_count in range(max_retries):
+            try:
+                response = requests.get(encoding, timeout=timeout_seconds)
+                if response.status_code == 200:
+                    image = Image.open(BytesIO(response.content))
+                    return image
+                else:
+                    logger.info(f"Failed to download image from {encoding} with status code {response.status_code}")    
+            except requests.exceptions.Timeout:
+                logger.error("Request timed out.")                
+            except Exception as e:
+                logger.info(f"Attempt {retry_count + 1} failed: {e.__class__.__name__}")
+                raise HTTPException(status_code=422, detail="Invalid image url") from e
+        raise HTTPException(status_code=422, detail="Failed to download image from url")
 
     if encoding.startswith("data:image/"):
         encoding = encoding.split(";")[1].split(",")[1]
