@@ -40,15 +40,15 @@ theme_to_prompt =  {
     #["Surprise me", "Studio", "Outdoors", "Silk", "Cafe", "Tabletop", 
     # "Kitchen", "Flowers", "Nature", "Beach", "Bathroom", "Furniture", "Paint", "Fruits", "Water", "Pebbles", "Snow"]
     "Surprise me": "",
-    "Studio":"photography studio style, colorful background，diffused lighting, and a variety of backdrops.",
-    "Outdoors":"beautiful outdoor backdrop showcasing nature's vibrant colors, the nature, clear sky",
+    "Studio":"studio photography style, colorful background，diffused lighting, and a variety of backdrops",
+    "Outdoors":"standing on the ground, beautiful outdoor, showcasing nature's vibrant colors, the nature",
     "Silk":"graceful display of flowing silk fabric, capturing its smooth texture, vibrant colors, and elegant drape.",
     "Cafe":"a cozy cafe environment, welcoming atmosphere",
-    "Tabletop":"a tabletop setting, with a variety of objects, textures, and colors, a well-organized and inspiring desktop setup, a tidy workspace, and tasteful decorations",
+    "Tabletop":"on a desk, a well-organized desktop setup, clean workspace",
     "Kitchen":"in a kitchen setting that exudes warmth and functionality, cozy background",
     "Flowers":"a vibrant arrangement of flowers, capturing their delicate petals, diverse colors, and the natural beauty they bring.",
     "Nature":"awe-inspiring beauty of nature, with majestic mountains, a lush forest, and a meandering river flowing through the landscape.",
-    "Beach":"picturesque beach scene, with golden sand, crystal-clear turquoise waters, and a peaceful horizon",
+    "Beach":"on the sand, with golden sand, crystal-clear turquoise waters, peaceful sea",
     "Bathroom":"in a luxurious bathroom setting, evoking a sense of tranquility and rejuvenation, clean background",
     "Furniture":"in a living room, cozy background, showcasing the furniture's unique design, rich textures, and vibrant colors.",
     "Paint":"oil painting, with rich brushstrokes, vibrant colors, and a captivating composition.",
@@ -445,6 +445,7 @@ class Api:
         init_images = decode_base64_to_image(init_images_url) # type: Image.Image
         mask = mask_image_from_init(init_images) # type: string
         init_images = pil_img_to_base64(init_images)
+        batch_size = img2imgreq.batch_size
 
         # theme的优先级比prompt高，先看有无theme，再看prompt
         theme = img2imgreq.theme
@@ -483,7 +484,7 @@ class Api:
                     "subseed_strength": 0,
                     "seed_resize_from_h": 0,
                     "seed_resize_from_w": 0,
-                    "batch_size": 1,
+                    "batch_size": batch_size,
                     "n_iter": 1,
                     "steps": 35,
                     "cfg_scale": 7.5,  # classifier guidance的程度
@@ -502,7 +503,7 @@ class Api:
                         "controlnet": {
                             "args": [
                                 {
-                                    "input_image": init_images,
+                                    # "input_image": init_images,
                                     "module": "canny",
                                     "model":"control_v11p_sd15_canny [d14c016b]",
                                     "threshold_a":100,
@@ -578,7 +579,7 @@ class Api:
                     shared.total_tqdm.clear()
 
         b64images = list(map(encode_pil_to_base64, processed.images)) if send_images else []
-        b64images = [b64images[0]] if len(b64images) == 2 else b64images
+        b64images = b64images[:-1]
 
         if not img2imgreq.include_init_images:
             img2imgreq.init_images = None
